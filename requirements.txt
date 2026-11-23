@@ -1,0 +1,10 @@
+torch>=2.1
+torchvision>=0.16
+streamlit>=1.57
+Pillow>=10.0
+numpy>=1.26
+scikit-learn>=1.4
+tqdm>=4.66
+lime>=0.2.0.1
+shap>=0.45
+scikit-image>=0.22

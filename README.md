@@ -3,6 +3,7 @@
 This project builds a trustworthy and explainable diabetic retinopathy diagnostic pipeline using a pretrained ResNet50 backbone and a Streamlit web app.
 
 ## Features
+- Professional home page with model readiness and workflow navigation
 - Fundus image preprocessing and labeling
 - Transfer learning with pretrained ResNet50
 - Training and validation pipeline with class imbalance awareness
@@ -69,14 +70,14 @@ data/
     2/
     3/
     4/
-    not_eye/  # Optional; recommended for rejecting unrelated uploads
+    not_eye/
   val/
     0/
     1/
     2/
     3/
     4/
-    not_eye/  # Include when using train/not_eye
+    not_eye/
 ```
 
 Classes are:
@@ -85,14 +86,44 @@ Classes are:
 - 2: Moderate
 - 3: Severe
 - 4: Proliferative DR
-- `not_eye` (optional): images that are not retinal fundus photos
+- `not_eye`: images that are not retinal fundus photos
 
-The `not_eye` class is optional for backwards compatibility, but strongly
-recommended. Include diverse non-fundus examples (people, objects, documents,
-other medical images, and poor-quality uploads) in both splits to teach the model
-when to reject an image. The app also rejects low-confidence outputs, but neither
-that check nor the learned `not_eye` class guarantees detection of every unrelated
-image. Retrain after adding this class.
+The app requires all six classes, including `not_eye`, before it enables image
+screening. Include diverse non-fundus examples (people, objects, documents, other
+medical images, and poor-quality uploads) in both splits to teach the model when
+to reject an image. The app rejects low-score outputs, but neither that check nor
+the learned `not_eye` class guarantees detection of every unrelated image.
+
+The included checkpoint is a synthetic demo model trained on generated images,
+not retinal photographs. The app disables predictions with this checkpoint.
+Train with a real, labeled dataset before using image prediction. The image
+prediction tab accepts multiple JPG/PNG images and provides a downloadable CSV
+detection list.
+
+### Preparing APTOS images
+The [APTOS 2019 Kaggle competition](https://www.kaggle.com/competitions/aptos2019-blindness-detection/data)
+provides labeled DR images. Sign in to Kaggle and accept the competition rules to
+download the data. Use its labeled `train_images/` and `train.csv`; do not use
+unlabeled test images for training.
+
+Collect a separate folder of non-retinal images that you have permission to use.
+Include varied everyday photos, documents, and other images; do not use patient
+photos without appropriate permission. Then prepare the six-class train/validation
+folders locally:
+
+```powershell
+python prepare_aptos_dataset.py `
+  --images-dir "C:\data\aptos\train_images" `
+  --labels-csv "C:\data\aptos\train.csv" `
+  --not-eye-dir "C:\data\not_eye" `
+  --output-dir "C:\data\prepared"
+Compress-Archive -Path "C:\data\prepared\train","C:\data\prepared\val" `
+  -DestinationPath "C:\data\retinopathy_training.zip"
+```
+
+Upload `retinopathy_training.zip` in the app's **Train a real model** tab. The
+preparation script splits each DR grade and `not_eye` class between train and
+validation. Training on public research data is still not clinical validation.
 
 ## Explainability
 The app can generate Grad-CAM overlays, LIME superpixel explanations, and SHAP

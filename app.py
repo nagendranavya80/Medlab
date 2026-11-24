@@ -1,18 +1,21 @@
-from pathlib import Path
+import csv
+import io
 import json
 import random
 import tempfile
 import zipfile
+from pathlib import Path
 
 import streamlit as st
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, UnidentifiedImageError
 from torch import nn
 from torch.optim import AdamW
 from sklearn.metrics import accuracy_score
 
 from src.data import CLASS_LABELS, build_transforms, create_dataloaders
 from src.explainability import grad_cam, lime_explanation, shap_explanation
+from src.inference import predict_images
 from src.model import build_model
 
 
@@ -124,19 +127,98 @@ def train_uploaded_dataset(dataset_dir, epochs, batch_size, image_size, progress
     return best_accuracy
 
 
-st.set_page_config(page_title="Diabetic Retinopathy Tool", page_icon="👁️")
-st.title("Diabetic Retinopathy Diagnostic Tool")
+st.set_page_config(
+    page_title="RetinaCare | Research workspace",
+    page_icon=":material/visibility:",
+    layout="wide",
+)
+st.title("RetinaCare", icon=":material/visibility:")
+st.caption("Diabetic retinopathy research workspace")
 st.warning(
     "Research and decision-support demo only. It is not a diagnosis and must not be "
     "used to guide patient care."
 )
 
-tab_demo, tab_upload, tab_training = st.tabs(
-    ["Professor demo", "Image prediction", "Train a real model"]
+model = checkpoint = device = class_names = None
+if CHECKPOINT.is_file():
+    model, checkpoint, device = load_model(str(CHECKPOINT), CHECKPOINT.stat().st_mtime)
+    class_names = checkpoint["class_names"]
+    if checkpoint.get("demo_training", False):
+        st.sidebar.error("Synthetic demo model - predictions disabled")
+    elif set(class_names) != set(CLASS_LABELS):
+        st.sidebar.warning("Model needs retraining")
+    else:
+        st.sidebar.success("Model available")
+else:
+    st.sidebar.info("No model checkpoint available")
+
+tab_home, tab_upload, tab_training, tab_demo = st.tabs(
+    ["Home", "Image screening", "Train a model", "Example demo"]
 )
 
+with tab_home:
+    with st.container(border=True):
+        intro_column, status_column = st.columns([1.7, 1], vertical_alignment="center")
+        with intro_column:
+            st.markdown(":blue-badge[RETINAL IMAGE WORKFLOW]")
+            st.header(
+                "A clear workspace for retinal image review",
+                icon=":material/visibility:",
+            )
+            st.write(
+                "Screen JPG and PNG images in batches, review model outputs, and "
+                "export a detection list. Train with labeled data to enable screening."
+            )
+            st.caption("Choose Image screening or Train a model from the tabs above.")
+
+        with status_column:
+            st.markdown("#### Model readiness")
+            if checkpoint is None:
+                st.badge("No model installed", color="gray")
+                st.caption("Train a model to enable image screening.")
+            elif checkpoint.get("demo_training", False):
+                st.badge("Synthetic demo", color="orange")
+                st.caption(
+                    "Real-image predictions are disabled until a model is trained "
+                    "with labeled retinal data."
+                )
+            elif set(class_names) != set(CLASS_LABELS):
+                st.badge("Needs retraining", color="orange")
+                st.caption("The model must include all DR grades and the not_eye class.")
+            else:
+                st.badge("Model available", color="green")
+                st.caption(
+                    "Model scores are not calibrated and are not diagnostic results."
+                )
+
+    st.subheader("Get started")
+    workflow_columns = st.columns(3)
+    workflow_cards = (
+        (
+            "1. Screen images",
+            "Upload one or more retinal images and review the result table.",
+        ),
+        (
+            "2. Train a model",
+            "Provide labeled images for DR grades 0-4 and the not_eye class.",
+        ),
+        (
+            "3. Review explanations",
+            "Explore Grad-CAM, LIME, or SHAP to inspect model behavior.",
+        ),
+    )
+    for column, (title, description) in zip(workflow_columns, workflow_cards):
+        with column.container(border=True, height="stretch"):
+            st.markdown(f"#### {title}")
+            st.write(description)
+
+    st.info(
+        "This research app is not clinically validated. Do not use its outputs "
+        "to make medical decisions."
+    )
+
 with tab_demo:
-    st.subheader("Quick demonstration")
+    st.subheader("Example demo")
     st.caption(
         "This showcase uses simulated fundus imagery. It demonstrates the interface "
         "and explanation workflow, not clinical accuracy."
@@ -148,97 +230,183 @@ with tab_demo:
         value=2,
     )
     showcase_image = create_showcase_image(showcase_class)
-    st.image(showcase_image, caption="Synthetic fundus sample", width=360)
+    st.image(
+        showcase_image,
+        caption="Synthetic fundus sample",
+        alt="Synthetic illustration of a retina",
+        width=360,
+    )
     if st.button("Run demonstration prediction"):
         st.success(f"Demo output: {CLASS_LABELS[str(showcase_class)]}")
         st.write(
-            "The sample and explanation are synthetic. The deployed model is trained "
-            "on generated images and must not be used for medical decisions."
+            "The sample and output are synthetic. They do not represent a trained "
+            "retinal classifier and must not be used for medical decisions."
         )
 
-if not CHECKPOINT.is_file():
+if checkpoint is None:
     with tab_upload:
         st.info("No trained model is available. Use the training tab to upload a dataset.")
-    with tab_training:
-        st.info("Upload a ZIP containing train/ and val/ folders.")
 else:
-    model, checkpoint, device = load_model(str(CHECKPOINT), CHECKPOINT.stat().st_mtime)
-    if checkpoint.get("demo_training", False):
-        st.sidebar.error("DEMO MODEL - not clinically valid")
-    else:
-        st.sidebar.success("Trained model loaded")
-
     image_size = int(checkpoint["image_size"])
     _, eval_transform = build_transforms(image_size)
     with tab_upload:
-        uploaded_file = st.file_uploader(
-            "Upload a retinal fundus image",
-            type=("jpg", "jpeg", "png"),
-        )
-        if uploaded_file:
-            image = Image.open(uploaded_file).convert("RGB")
-            st.image(image, caption="Uploaded image", use_container_width=True)
-            tensor = eval_transform(image).unsqueeze(0).to(device)
-            with torch.no_grad():
-                probabilities = torch.softmax(model(tensor), dim=1)[0].cpu()
-            predicted_index = int(probabilities.argmax())
-            class_names = checkpoint["class_names"]
-            predicted_class = class_names[predicted_index]
-            confidence = float(probabilities[predicted_index])
-            st.caption(
-                f"Model score: {confidence:.1%}. Scores are not calibrated probabilities "
-                "and do not indicate diagnostic accuracy."
+        if checkpoint.get("demo_training", False):
+            st.error(
+                "The installed checkpoint was trained on generated sample images, not "
+                "retinal photographs. Its predictions are disabled. Train a new model "
+                "with the training tab and a real labeled dataset before uploading photos."
             )
-            if confidence < MIN_MODEL_CONFIDENCE:
-                st.error(
-                    "This image cannot be classified reliably. It may not be a retinal "
-                    "fundus image or may be unlike the training images."
+        elif set(class_names) != set(CLASS_LABELS):
+            st.error(
+                "This model is missing one or more DR grades or the not_eye class. "
+                "Retrain with folders 0, 1, 2, 3, 4, and not_eye before using image screening."
+            )
+        else:
+            uploaded_files = st.file_uploader(
+                "Upload one or more retinal fundus images",
+                type=("jpg", "jpeg", "png"),
+                accept_multiple_files=True,
+            )
+            st.caption(
+                "The model score is not a calibrated probability or a measure of "
+                "diagnostic accuracy. Results are for research only."
+            )
+            if uploaded_files:
+                images = []
+                results = [None] * len(uploaded_files)
+                for file_index, uploaded_file in enumerate(uploaded_files):
+                    try:
+                        with Image.open(uploaded_file) as opened_image:
+                            images.append(
+                                (
+                                    file_index,
+                                    uploaded_file.name,
+                                    opened_image.convert("RGB"),
+                                )
+                            )
+                    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+                        results[file_index] = {
+                            "Image": uploaded_file.name,
+                            "Prediction": "Could not read image",
+                            "Top model class": "",
+                            "Model score": None,
+                            "Status": "Invalid or unsupported image",
+                        }
+
+                predictions = predict_images(
+                    model,
+                    [(filename, image) for _, filename, image in images],
+                    class_names,
+                    eval_transform,
+                    device,
+                    MIN_MODEL_CONFIDENCE,
                 )
-            elif predicted_class == "not_eye":
-                st.error(
-                    "This does not appear to be a retinal fundus image. Please upload "
-                    "a clear retinal fundus photo."
+                predictions_by_index = {}
+                for (file_index, _, _), prediction in zip(images, predictions):
+                    results[file_index] = prediction
+                    predictions_by_index[file_index] = prediction
+                results = [result for result in results if result is not None]
+                st.subheader("Detection list")
+                st.dataframe(
+                    results,
+                    hide_index=True,
+                    alt="Model predictions and screening status for uploaded images",
                 )
-            else:
-                st.subheader(f"Model prediction: {CLASS_LABELS[predicted_class]}")
-                st.bar_chart(
-                    {
-                        CLASS_LABELS[class_name]: float(probabilities[index])
+                csv_buffer = io.StringIO()
+                columns = (
+                    "Image",
+                    "Prediction",
+                    "Top model class",
+                    "Model score",
+                    "Status",
+                )
+                writer = csv.DictWriter(csv_buffer, fieldnames=columns)
+                writer.writeheader()
+                writer.writerows(results)
+                st.download_button(
+                    "Download detection list (CSV)",
+                    data=csv_buffer.getvalue(),
+                    file_name="retinopathy_detection_results.csv",
+                    mime="text/csv",
+                )
+
+                if images:
+                    selected_index = st.selectbox(
+                        "Image to explain",
+                        range(len(images)),
+                        format_func=lambda index: images[index][1],
+                    )
+                    file_index, image_name, image = images[selected_index]
+                    prediction = predictions_by_index[file_index]
+                    predicted_label = prediction["Top model class"]
+                    predicted_index = next(
+                        index
                         for index, class_name in enumerate(class_names)
-                    }
-                )
+                        if CLASS_LABELS[class_name] == predicted_label
+                    )
+                    method = st.selectbox(
+                        "Explanation method", ("Grad-CAM", "LIME", "SHAP")
+                    )
+                    if st.button("Generate explanation"):
+                        try:
+                            if method == "Grad-CAM":
+                                heatmap = grad_cam(
+                                    model, image, predicted_index, image_size, device
+                                )
+                                colored = Image.fromarray(
+                                    (heatmap * 255).astype("uint8")
+                                ).resize(image.size)
+                                overlay = Image.blend(
+                                    image, colored.convert("RGB"), alpha=0.4
+                                )
+                                st.image(
+                                    overlay,
+                                    caption=f"Grad-CAM attention overlay for {image_name}",
+                                    alt="Grad-CAM attention overlay",
+                                    width="stretch",
+                                )
+                            elif method == "LIME":
+                                explanation = lime_explanation(
+                                    model, image, image_size, device
+                                )
+                                st.image(
+                                    explanation,
+                                    caption=f"LIME superpixel explanation for {image_name}",
+                                    alt="LIME superpixel explanation",
+                                    width="stretch",
+                                )
+                            else:
+                                attribution = shap_explanation(
+                                    model, image, predicted_index, image_size, device
+                                )
+                                st.image(
+                                    attribution,
+                                    caption=f"SHAP attribution for {image_name}",
+                                    alt="Mean absolute SHAP attribution",
+                                    width="stretch",
+                                )
+                        except (ImportError, RuntimeError, ValueError) as error:
+                            st.error(f"Could not generate the {method} explanation: {error}")
 
-            method = st.selectbox("Explanation method", ("Grad-CAM", "LIME", "SHAP"))
-            if st.button("Generate explanation"):
-                try:
-                    if method == "Grad-CAM":
-                        heatmap = grad_cam(model, image, predicted_index, image_size, device)
-                        colored = Image.fromarray((heatmap * 255).astype("uint8")).resize(image.size)
-                        overlay = Image.blend(image.convert("RGB"), colored.convert("RGB"), alpha=0.4)
-                        st.image(overlay, caption="Grad-CAM attention overlay", use_container_width=True)
-                    elif method == "LIME":
-                        explanation = lime_explanation(model, image, image_size, device)
-                        st.image(explanation, caption="LIME superpixel explanation", use_container_width=True)
-                    else:
-                        attribution = shap_explanation(model, image, predicted_index, image_size, device)
-                        st.image(attribution, caption="Mean absolute SHAP attribution", use_container_width=True)
-                except (ImportError, RuntimeError, ValueError) as error:
-                    st.error(f"Could not generate the {method} explanation: {error}")
-
-    st.caption(
-        f"Validation accuracy on the training split: {checkpoint['val_accuracy']:.1%}"
-    )
+    if not checkpoint.get("demo_training", False):
+        st.caption(
+            f"Validation accuracy on the training split: {checkpoint['val_accuracy']:.1%}"
+        )
 
 with tab_training:
     st.subheader("Train on a retinal image dataset")
     st.info(
-        "Training runs in the app process and saves the resulting model only for this "
-        "session. Streamlit Cloud restarts may remove local checkpoints."
+        "Training runs in the app process. The ZIP must contain real labeled images "
+        "for all five DR grades plus a not_eye class. Streamlit Cloud restarts may "
+        "remove models trained in the app."
     )
     dataset_archive = st.file_uploader(
         "Upload dataset ZIP",
         type=("zip",),
-        help="The ZIP must contain train/<class>/ and val/<class>/ image folders.",
+        help=(
+            "The ZIP must contain train/ and val/ folders, each with class folders "
+            "0, 1, 2, 3, 4, and not_eye."
+        ),
     )
     col1, col2 = st.columns(2)
     with col1:

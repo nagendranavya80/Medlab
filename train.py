@@ -18,7 +18,7 @@ from src.model import build_model
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train a DR classifier, optionally including a not_eye class."
+        description="Train a DR classifier with a not_eye class for image screening."
     )
     parser.add_argument("--data_dir", type=Path, help="Folder containing train/ and val/.")
     parser.add_argument("--epochs", type=int, default=10)

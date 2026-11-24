@@ -5,15 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-
-CLASS_LABELS = {
-    "0": "No DR",
-    "1": "Mild",
-    "2": "Moderate",
-    "3": "Severe",
-    "4": "Proliferative DR",
-    "not_eye": "Not a retinal fundus image",
-}
+from src.labels import CLASS_LABELS
 
 
 def build_transforms(image_size=224):
@@ -55,9 +47,9 @@ def create_dataloaders(data_dir, batch_size=32, image_size=224, num_workers=0):
     if train_dataset.classes != val_dataset.classes:
         raise ValueError("The train and val folders must contain the same class folders.")
     dr_classes = ["0", "1", "2", "3", "4"]
-    if train_dataset.classes not in (dr_classes, dr_classes + ["not_eye"]):
+    if train_dataset.classes != dr_classes + ["not_eye"]:
         raise ValueError(
-            "Expected class folders 0, 1, 2, 3, and 4, optionally followed by not_eye."
+            "Expected class folders 0, 1, 2, 3, 4, and not_eye."
         )
     if not train_dataset.samples or not val_dataset.samples:
         raise ValueError("Both train and val folders must contain images.")
